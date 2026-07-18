@@ -10,12 +10,12 @@
 
 <p align="center">
   <a href="https://github.com/tahabahar/NetsenseSmartApps">
-    <img src="https://img.shields.io/badge/NetsenseSmartApps-C%23-239120?style=for-the-badge&logo=csharp&logoColor=white" />
+    <img src="https://img.shields.io/badge/Smart%20Apps%20Suite-C%23-239120?style=for-the-badge&logo=csharp&logoColor=white" />
   </a>
 </p>
 
 <p align="center">
-  <b>elaportv1</b> — cinematic monochrome scroll portfolio built with Vite, React 19, GSAP & WebGL 🎬<br/>
+  <b>Ela Portfolio</b> — cinematic monochrome scroll portfolio built with Vite, React 19, GSAP & WebGL 🎬<br/>
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white" />
   <img src="https://img.shields.io/badge/React-61DAFB?style=flat-square&logo=react&logoColor=black" />
   <img src="https://img.shields.io/badge/GSAP-88CE02?style=flat-square&logo=greensock&logoColor=white" />
