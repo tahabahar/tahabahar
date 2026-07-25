@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="https://readme-typing-svg.demolab.com?font=Cascadia+Code&weight=700&size=30&pause=1000&color=00FF66&center=true&vCenter=true&width=600&height=60&lines=Hi%2C+I'm+Taha+Bahar+%F0%9F%91%8B;Full-Stack+Developer;Building+with+.NET+%26+React;Exploring+Python+%2B+Go;Always+shipping+something+new" alt="typing banner" />
+  <img src="https://readme-typing-svg.demolab.com?font=Cascadia+Code&weight=700&size=30&pause=1000&color=00FF66&center=true&vCenter=true&width=600&height=60&lines=Hi%2C+I%27m+Taha+Bahar+%F0%9F%91%8B;Full-Stack+Developer;Building+with+.NET+%26+React;Exploring+Python+%2B+Go;Always+shipping+something+new" alt="typing banner" />
 </h1>
 
 <p align="center">
@@ -99,21 +99,25 @@
 ## 📊 GitHub Stats
 
 <p align="center">
-  <img height="165" src="https://github-readme-stats.vercel.app/api?username=tahabahar&show_icons=true&hide_border=true&title_color=00ff66&icon_color=00ff66&text_color=c9f7d0&bg_color=0a0e0a&include_all_commits=true" alt="stats"/>
-  <img height="165" src="https://github-readme-streak-stats.demolab.com/?user=tahabahar&hide_border=true&background=0a0e0a&border=1f7a3f&stroke=1f7a3f&ring=00ff66&fire=00ff66&currStreakNum=c9f7d0&sideNums=c9f7d0&currStreakLabel=00ff66&sideLabels=c9f7d0&dates=1f7a3f" alt="streak"/>
+  <img height="165" src="https://streak-stats.demolab.com/?user=tahabahar&hide_border=true&background=0a0e0a&border=1f7a3f&stroke=1f7a3f&ring=00ff66&fire=00ff66&currStreakNum=c9f7d0&sideNums=c9f7d0&currStreakLabel=00ff66&sideLabels=c9f7d0&dates=1f7a3f" alt="streak"/>
 </p>
 
 <p align="center">
-  <img height="165" src="https://github-readme-stats.vercel.app/api/top-langs/?username=tahabahar&layout=compact&hide_border=true&langs_count=8&title_color=00ff66&text_color=c9f7d0&bg_color=0a0e0a" alt="top langs"/>
+  <img height="165" src="https://github-profile-summary-cards.vercel.app/api/cards/profile-details?username=tahabahar&theme=github_dark" alt="profile summary"/>
 </p>
 
----
+<p align="center">
+  <img height="165" src="https://github-profile-summary-cards.vercel.app/api/cards/most-commit-language?username=tahabahar&theme=github_dark" alt="most commit language"/>
+  <img height="165" src="https://github-profile-summary-cards.vercel.app/api/cards/repos-per-language?username=tahabahar&theme=github_dark" alt="repos per language"/>
+</p>
 
+<!-- Aşağıdaki kartlar (github-readme-stats & github-profile-trophy) barındırıldıkları servis şu an "deployment paused" durumunda olduğu için kapatıldı; servis geri gelirse açılabilir.
 ## 🏆 Trophies
 
 <p align="center">
   <img src="https://github-profile-trophy.vercel.app/?username=tahabahar&theme=matrix&no-frame=true&no-bg=true&column=7&margin-w=8" alt="trophies"/>
 </p>
+-->
 
 ---
 
