@@ -14,7 +14,7 @@
 </picture>
 </p>
 
-<p align="center"><sub>🐍 <code>snake.sh</code> &nbsp;·&nbsp; 🟡 <code>pacman.sh</code> &nbsp;·&nbsp; 🧩 <code>tetris.sh</code> &nbsp;—&nbsp; the board advances on its own every 12s</sub></p>
+<p align="center"><sub>🐍 <code>snake.sh</code> &nbsp;·&nbsp; 🟡 <code>pacman.sh</code> &nbsp;·&nbsp; 🧩 <code>tetris.sh</code> &nbsp;—&nbsp; the board advances on its own every 20s</sub></p>
 
 ---
 
