@@ -1,0 +1,40 @@
+.github/workflows/arcade.ymlname: arcade
+
+on:
+  schedule:
+    - cron: "17 3 * * *"      # every day at 03:17 UTC
+  workflow_dispatch:           # lets you run it by hand from the Actions tab
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: generate arcade svg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCADE_USER: ${{ github.repository_owner }}
+          ARCADE_OUT: dist
+        run: node .github/arcade/generate.js
+
+      - name: publish to the arcade branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd dist
+          git init -q
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -qm "arcade: $(date -u +%F)"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:arcade
