@@ -1,4 +1,4 @@
-.github/workflows/arcade.ymlname: arcade
+name: arcade
 
 on:
   schedule:
