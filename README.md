@@ -28,7 +28,7 @@
 </picture>
 </p>
 
-<p align="center"><sub>every commit is a civilian at a window — he swings the facade and gets them out, one arc at a time</sub></p>
+<p align="center"><sub>every commit is a civilian at a window — he works the facade hand over hand, throws each one into the web in the corner, and hangs upside down when the last is out</sub></p>
 
 ---
 

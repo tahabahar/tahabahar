@@ -520,230 +520,412 @@ function label(t, title, sub) {
  *  spiderman.sh  -  a standalone panel, not a carousel slide
  * ----------------------------------------------------------------- *
  *  The contribution grid is read as a building facade: every commit
- *  is a lit window with somebody in it. A web-slinger swings across
- *  and scoops them out, one arc at a time.
+ *  is a lit window with somebody in it. A web-slinger works the
+ *  facade in passes until he has pulled every last one out.
  *
- *  The swing is a rigid pendulum built from two nested groups:
+ *  Every leg starts at the back apex of a swing and ends at the front
+ *  apex of the same swing, which is the whole reason the run does not
+ *  stutter: at an apex the angular velocity is zero, so handing over
+ *  to the next web there breaks neither position nor velocity. Release
+ *  anywhere else and the anchor jumps while he still has speed, which
+ *  the eye reads as a teleport.
  *
- *      <g .wa>   translate(anchorX, ANCHOR_Y)   - where the web bit
- *        <g .wr>   rotate(theta)                - the actual swing
- *          <g .wl>   scale(1, L)                - the web line
- *          <g .wh>   translate(0, L)            - the hero
+ *  A leg is (row, ain, aout). The row fixes where the arc bottoms out;
+ *  ain is how far behind he grabs; aout how far ahead he lets go. The
+ *  web length then follows from having to start exactly where the last
+ *  leg ended:
  *
- *  That nesting is the whole trick. You cannot pin the end of a
- *  <line> to something offset-path is moving, but rotating a rigid
- *  group keeps the web and the hero attached for free - and hands
- *  you real pendulum motion as a bonus. Everything below is still
- *  pure CSS keyframes, because GitHub strips <script>.
+ *      L      = (rowY - releaseY) / (1 - cos(ain))
+ *      anchor = (releaseX + L*sin(ain), rowY - L)
+ *
+ *  so the geometry is solved, never approximated - and he only ever
+ *  travels left to right, one web at a time, alternating hands.
+ *
+ *      <g .wa>   translate(anchor)
+ *        <g .wr>   rotate(theta)      - pendulum, integrated not eased
+ *          <g .wl>   scale(1, L)      - the web, thwips out of his hand
+ *          <g .wh>   translateY(L)
+ *            <g .wsp>  rotate(spin)   - the somersault he exits on
+ *
+ *  Still pure CSS keyframes - GitHub strips <script>.
  * ================================================================= */
 
 /* ---------------------------------------------------------- geometry */
-const SP_PAD_T = 64;
+const SP_PAD_T = 112;                // headroom for the web he throws people into
 const SP_PAD_B = 60;
 const SGY = SP_PAD_T;
 const SP_H = SP_PAD_T + GRID_H + SP_PAD_B;
 const scy = (r) => SGY + r * P + CELL / 2;
 
+/* ---------------------------------------------------------------- net */
+const NET_X = W - 96;
+const NET_Y = 58;
+const NET_R = 44;
+
 /* ------------------------------------------------------------ timing */
-const SP_TOTAL = 16;                 // the panel loops on its own, faster than the arcade
-const SP_IN = 0.9;                   // beat before he drops into frame
-const SP_OUT = 2.6;                  // beat to read the final count
+const SP_TOTAL = 28;
+const SP_IN = 0.5;
+const SP_OUT = 3.8;                  // he hangs off the last web and takes a bow
 const SP_PLAY = SP_TOTAL - SP_IN - SP_OUT;
+const SP_GAP = 0.4;                  // he is off the panel between passes
+const HOLD_T = 3.3;                  // upside down by the net at the end
 const spct = (t) => +((t / SP_TOTAL) * 100).toFixed(3);
 
-/* ------------------------------------------------------------- swing */
-const SW_A = 30;                                  // half-angle of one swing, degrees
-const SW_SIN = Math.sin((SW_A * Math.PI) / 180);
-const ANCHOR_Y = 6;                               // where the webs bite, near the top edge
-const SW_TAIL = 0.22;                             // last slice of a swing: reel in to the next length
-const SW_STEPS = 30;                              // trajectory samples per swing
-const SW_RX = 12;                                 // rescue reach, horizontal (px)
-const SW_RY = 25;                                 // rescue reach, vertical (px)
-const SW_MAX = 16;
-const SP_BUCKETS = 80;                            // rescue-timing resolution
-const HUD_STEPS = 18;                             // how many times the counter ticks up
+/* -------------------------------------------------------------- swing */
+const REACH = 15;                    // how close he passes to grab someone
+const AIN = [20, 26, 32, 38, 44, 50];        // how far behind he grabs on
+const AOUT = [22, 28, 34, 40, 46];           // how far ahead he lets go
+const L_MIN = 70;
+const L_MAX = 148;
+const ANCHOR_MIN_Y = -155;           // webs may leave the frame, but not absurdly
+const ARC_STEPS = 34;
+const ROT_KF = 8;
+const LEG_MAX = 60;
+const PASS_MAX = 8;
+const SP_BUCKETS = 128;
+const HUD_STEPS = 22;
+
+const rad = (d) => (d * Math.PI) / 180;
+
+// Angles here are measured so that positive is AHEAD of the anchor - he grabs
+// on at -ain, behind himself, and lets go at +aout, in front. CSS rotate()
+// turns the other way (clockwise, screen axes), so every angle is negated on
+// the way into a keyframe and nowhere else. Getting this backwards is what
+// makes a swing travel the wrong way while the anchors still march forward,
+// which reads as him snapping ahead at the end of every leg.
+const legPos = (g, th) => [g.ax + g.L * Math.sin(rad(th)), g.ay + g.L * Math.cos(rad(th))];
+const cssDeg = (a) => (-a).toFixed(2);
 
 /**
- * Chain the swings left to right.
+ * theta(t) for one leg, straight off the pendulum.
  *
- * A swing is fully described by its anchor x and its length L, because the
- * bottom of the arc sits at (anchorX, ANCHOR_Y + L) - so choosing a row
- * chooses L, and the anchor then follows from the previous swing:
- *
- *     anchorX[k+1] = anchorX[k] + 2 * L[k+1] * sin(A)
- *
- * which is exactly the condition for the hero's position to be continuous
- * across the release. He lets go at +A, the anchor jumps ahead, and he is
- * already at -A on the new web at the same point in space. The length is
- * reeled in over the tail of the previous swing, so nothing snaps.
- *
- * Each row is scored by how many un-rescued commits its arc would sweep,
- * with a little noise so he does not settle into one row for the whole run.
+ * Energy conservation gives omega proportional to sqrt(cos t - cos tmax), so
+ * integrating dt = dtheta/omega across the arc and reading it back at equal
+ * time steps yields the angles to hang keyframes on. tmax sits just outside
+ * the arc so he slows almost to a stop at each apex without stalling - which
+ * is exactly the beat between one web and the next.
  */
-function swingPlan(grid, rng) {
-  const taken = new Set();
-  const swings = [];
-  let ax = GX - 26;                                // start off the left edge
-  let prevR = 5;
-  let dir = -1;                                    // -1 pulls up, +1 dives
-
-  while (swings.length < SW_MAX) {
-    // candidate rows are only ever in the current direction: that is what turns
-    // the route into a wave instead of a tidy horizontal stripe
-    let cand = [];
-    for (let pass = 0; pass < 2 && !cand.length; pass++) {
-      for (let r = 0; r < ROWS; r++) {
-        const d = (r - prevR) * dir;
-        if (d >= 1 && d <= 4) cand.push(r);
-      }
-      if (!cand.length) dir = -dir;
-    }
-    if (!cand.length) cand = [prevR];
-
-    let best = null;
-    for (const r of cand) {
-      const L = scy(r) - ANCHOR_Y;
-      const nx = swings.length === 0 ? ax : ax + 2 * L * SW_SIN;
-      const span = L * SW_SIN;
-      let score = 0;
-      for (let c = 0; c < COLS; c++) {
-        if (Math.abs(cx(c) - nx) > span + CELL) continue;
-        for (let rr = 0; rr < ROWS; rr++) {
-          if (!grid[c][rr] || taken.has(key(c, rr))) continue;
-          if (Math.abs(scy(rr) - scy(r)) > SW_RY) continue;
-          score += grid[c][rr];
-        }
-      }
-      score *= 0.75 + rng() * 0.5;                 // never the same wave twice
-      if (!best || score > best.score) best = { r, L, nx, span, score };
-    }
-
-    if (swings.length && best.nx > GX + GRID_W + 6) break;
-
-    for (let c = 0; c < COLS; c++) {
-      if (Math.abs(cx(c) - best.nx) > best.span + CELL) continue;
-      for (let rr = 0; rr < ROWS; rr++)
-        if (Math.abs(scy(rr) - scy(best.r)) <= SW_RY) taken.add(key(c, rr));
-    }
-
-    swings.push({ ax: best.nx, L: best.L, r: best.r });
-    ax = best.nx;
-    // turn around at the extremes, and now and then in open air
-    if (best.r <= 1 || best.r >= ROWS - 1 || rng() < 0.34) dir = -dir;
-    prevR = best.r;
+function pendulumKeys(a0, a1, n) {
+  const tmax = Math.max(Math.abs(a0), Math.abs(a1)) + 1.6;
+  const cmax = Math.cos(rad(tmax));
+  const STEPS = 180;
+  const dth = (a1 - a0) / STEPS;
+  const ts = [0];
+  for (let i = 0; i < STEPS; i++) {
+    const th = a0 + dth * (i + 0.5);
+    ts.push(ts[i] + Math.abs(dth) / Math.sqrt(Math.max(0.004, Math.cos(rad(th)) - cmax)));
   }
-  return swings;
+  const T = ts[STEPS];
+  const out = [];
+  for (let k = 0; k <= n; k++) {
+    const want = (k / n) * T;
+    let i = 0;
+    while (i < STEPS - 1 && ts[i + 1] < want) i++;
+    const f = (want - ts[i]) / (ts[i + 1] - ts[i] || 1);
+    out.push([k / n, a0 + dth * (i + f)]);
+  }
+  return out;
 }
 
-// a long web swings slowly: T proportional to sqrt(L), same as a real pendulum
-function swingTiming(swings) {
-  const w = swings.map((s) => Math.sqrt(s.L));
+// who this arc passes close enough to grab, and how far through the leg
+function sweep(g, left, byTime) {
+  const keys = byTime ? pendulumKeys(-g.ain, g.aout, ARC_STEPS) : null;
+  const hit = new Map();
+  for (let i = 0; i <= ARC_STEPS; i++) {
+    const p = i / ARC_STEPS;
+    const th = keys ? keys[i][1] : -g.ain + (g.ain + g.aout) * p;
+    const [x, y] = legPos(g, th);
+    const c0 = Math.round((x - GX - CELL / 2) / P);
+    const r0 = Math.round((y - SGY - CELL / 2) / P);
+    for (let dc = -1; dc <= 1; dc++)
+      for (let dr = -1; dr <= 1; dr++) {
+        const c = c0 + dc;
+        const r = r0 + dr;
+        if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue;
+        const k = key(c, r);
+        if (!left.has(k) || hit.has(k)) continue;
+        if (Math.hypot(cx(c) - x, scy(r) - y) <= REACH) hit.set(k, p);
+      }
+  }
+  return hit;
+}
+
+/**
+ * Plan the run as a series of left-to-right passes.
+ *
+ * One pass cannot reach every row - a downward arc can only bottom out below
+ * where it was grabbed - so he works the facade in sweeps, leaves the frame on
+ * the right and comes back in on the left for the next one. Each pass goes
+ * where the lit windows still are, and the run only ends when there are none.
+ */
+function planRoute(grid, rng) {
+  const left = new Map();
+  for (let c = 0; c < COLS; c++)
+    for (let r = 0; r < ROWS; r++)
+      if (grid[c][r]) left.set(key(c, r), { c, r, x: cx(c), y: scy(r) });
+
+  const legs = [];
+  const RIGHT = GX + GRID_W + 18;
+
+  for (let pass = 0; pass < PASS_MAX && left.size && legs.length < LEG_MAX; pass++) {
+    let prev = null;
+    let steps = 0;
+    let dry = 0;
+    // come back in just ahead of whatever is still lit, so a late pass is not
+    // spent swinging across a facade he has already emptied
+    const entry = Math.max(GX - 14, Math.min(...[...left.values()].map((c) => c.x)) - 52);
+
+    while (steps++ < 16 && legs.length < LEG_MAX) {
+      let best = null;
+
+      for (let row = 0; row < ROWS; row++) {
+        const rowY = scy(row);
+        for (const ain of AIN) {
+          let L;
+          let ax;
+          if (prev) {
+            const [rx, ry] = legPos(prev, prev.aout);
+            const drop = rowY - ry;
+            if (drop < 3) continue;                       // an arc cannot climb to its own floor
+            L = drop / (1 - Math.cos(rad(ain)));
+            ax = rx + L * Math.sin(rad(ain));
+          } else {
+            L = L_MIN + rng() * (L_MAX - L_MIN);          // entering: pick a length freely
+            ax = entry + L * Math.sin(rad(ain));
+          }
+          if (L < L_MIN || L > L_MAX) continue;
+          const ay = rowY - L;
+          if (ay < ANCHOR_MIN_Y) continue;
+
+          for (const aout of AOUT) {
+            const g = { ax, ay, L, ain, aout, row };
+            const hit = sweep(g, left, false);
+            const [rx2, ry2] = legPos(g, aout);
+            // people he actually reaches count for everything; a weak pull
+            // toward the ones he does not steers the late clean-up passes,
+            // and the step penalty buys more, tighter swings per pass
+            let pull = 0;
+            for (const c2 of left.values())
+              if (Math.abs(c2.x - rx2) < 90 && Math.abs(c2.y - ry2) < 60) pull++;
+            const score = hit.size * 14 + pull * 0.35 - (rx2 - ax) * 0.045 + rng() * 4;
+            if (!best || score > best.score) best = { g, hit, score, rx2 };
+          }
+        }
+      }
+
+      if (!best) break;
+      const g = best.g;
+      g.hit = sweep(g, left, true);
+      g.pass = pass;
+      g.hand = legs.length % 2;
+      for (const k of g.hit.keys()) left.delete(k);
+      legs.push(g);
+      prev = g;
+      if (best.rx2 > RIGHT) break;                        // off the right edge: pass over
+      // two empty swings in a row means this line is spent - break off and come
+      // back in somewhere useful rather than ride out an emptied facade
+      dry = g.hit.size ? 0 : dry + 1;
+      if (dry >= 2) break;
+      if (![...left.values()].some((c) => c.x > best.rx2 - 30)) break;
+    }
+
+    if (!prev) break;                                     // nothing feasible, stop cleanly
+    legs[legs.length - 1].exit = true;
+  }
+
+  // Curtain call: one more swing, judged on where it PARKS him rather than on
+  // who it saves, so he finishes hanging just under the web with everyone he
+  // pulled off the facade.
+  const last = legs[legs.length - 1];
+  last.exit = false;
+  let approach = null;
+  const [lx, ly] = legPos(last, last.aout);
+  for (let row = 0; row < ROWS; row++) {
+    const rowY = scy(row);
+    for (const ain of AIN) {
+      const drop = rowY - ly;
+      if (drop < 3) continue;
+      const L = drop / (1 - Math.cos(rad(ain)));
+      // this one carries no rescues, so let it be a long lazy traverse if that
+      // is what it takes to put him under the web
+      if (L < L_MIN || L > 250) continue;
+      const ay = rowY - L;
+      if (ay < ANCHOR_MIN_Y - 90) continue;
+      const ax = lx + L * Math.sin(rad(ain));
+      for (const aout of AOUT) {
+        const g = { ax, ay, L, ain, aout, row };
+        // he settles at the BOTTOM of this arc, not at the apex he stops on,
+        // so that is the point to park near the web
+        const cost = Math.hypot(g.ax - (NET_X - 18), g.ay + g.L - (NET_Y + 108));
+        if (!approach || cost < approach.cost) approach = { g, cost };
+      }
+    }
+  }
+  if (approach) {
+    const g = approach.g;
+    g.hit = new Map();
+    g.pass = last.pass;
+    g.hand = legs.length % 2;
+    legs.push(g);
+  }
+  legs[legs.length - 1].bow = true;                       // the hold hangs off this one
+  return legs;
+}
+
+// a pendulum's period goes with sqrt(L), and a leg is the slice of it the arc
+// actually covers - so short whips stay snappy and long sags take their time
+function legTiming(legs) {
+  const gaps = legs.filter((l) => l.exit).length;
+  const play = SP_PLAY - Math.max(0, gaps) * SP_GAP;
+  const w = legs.map((l) => Math.sqrt(l.L) * ((l.ain + l.aout) / 76));
   const sum = w.reduce((a, b) => a + b, 0);
-  const dur = w.map((x) => (x / sum) * SP_PLAY);
+  const dur = w.map((x) => (x / sum) * play);
   const start = [];
   let acc = SP_IN;
-  for (const d of dur) { start.push(acc); acc += d; }
+  legs.forEach((l, k) => {
+    start.push(acc);
+    acc += dur[k];
+    if (l.exit && k < legs.length - 1) acc += SP_GAP;
+  });
   return { dur, start };
 }
 
-// sample the arc the same way the CSS will draw it, so the rescue timings
-// line up with what the eye actually sees
-function swingTrajectory(swings, timing) {
-  const traj = [];
-  swings.forEach((sw, k) => {
-    const nextL = k + 1 < swings.length ? swings[k + 1].L : sw.L;
-    for (let i = 0; i < SW_STEPS; i++) {
-      const p = i / SW_STEPS;
-      const th = (-SW_A * Math.cos(Math.PI * p) * Math.PI) / 180;   // pendulum, -A -> +A
-      const L =
-        p < 1 - SW_TAIL
-          ? sw.L
-          : sw.L + (nextL - sw.L) * ((p - (1 - SW_TAIL)) / SW_TAIL);
-      traj.push({
-        x: sw.ax + L * Math.sin(th),
-        y: ANCHOR_Y + L * Math.cos(th),
-        t: timing.start[k] + p * timing.dur[k],
-      });
-    }
-  });
-  return traj;
-}
-
-// the moment each commit first comes within reach
-function rescueVisits(grid, traj) {
-  const seen = new Map();
-  for (let c = 0; c < COLS; c++)
-    for (let r = 0; r < ROWS; r++) {
-      if (!grid[c][r]) continue;
-      const x = cx(c);
-      const y = scy(r);
-      for (let i = 0; i < traj.length; i++) {
-        const dx = (traj[i].x - x) / SW_RX;
-        const dy = (traj[i].y - y) / SW_RY;
-        if (dx * dx + dy * dy <= 1) { seen.set(key(c, r), traj[i].t); break; }
-      }
-    }
-  return seen;
-}
-
 /* --------------------------------------------------------------- css */
-function swingRigCSS(swings, timing) {
-  const n = swings.length;
-  const at = (k) => (k < n ? timing.start[k] : SP_TOTAL);
-  const tail = (k) => timing.start[k] + timing.dur[k] * (1 - SW_TAIL);
-  const EPS = 0.004;                               // ~2.5ms: the release reads as instant
+function rigCSS(legs, timing) {
+  const n = legs.length;
+  const EPS = 0.004;
+  const f = (v) => v.toFixed(2);
+  const at = (t) => `${spct(t)}%`;
+  const bump = (t) => `${(spct(t) + EPS).toFixed(3)}%`;
 
-  let rot = `0%,${spct(SP_IN)}%{transform:rotate(${-SW_A}deg);animation-timing-function:cubic-bezier(.37,0,.63,1)}`;
-  let anc = `0%,${spct(at(1))}%{transform:translate(${swings[0].ax.toFixed(2)}px,${ANCHOR_Y}px)}`;
-  let len = `0%,${spct(tail(0))}%{transform:scale(1,${swings[0].L.toFixed(2)})}`;
-  let hero = `0%,${spct(tail(0))}%{transform:translateY(${swings[0].L.toFixed(2)}px)}`;
+  let anc = "", rot = "", len = "", hero = "", spin = "", web = "", fig = "", arm = "";
+  const hnd = ["", ""];
 
-  for (let k = 0; k < n; k++) {
-    const end = at(k) + timing.dur[k];
-    const nextL = k + 1 < n ? swings[k + 1].L : swings[k].L;
+  legs.forEach((g, k) => {
+    const s = timing.start[k];
+    const d = timing.dur[k];
+    const e = s + d;
+    const head = k === 0 ? `0%,${at(s)}` : bump(s);
+    const thwip = s + d * 0.14;
+    const letgo = s + d * 0.5;                    // only used on an exit leg
 
-    rot += `${spct(end)}%{transform:rotate(${SW_A}deg)}`;
-    if (k + 1 < n)
-      rot +=
-        `${(spct(end) + EPS).toFixed(3)}%{transform:rotate(${-SW_A}deg);` +
-        `animation-timing-function:cubic-bezier(.37,0,.63,1)}`;
+    anc += `${head}{transform:translate(${f(g.ax)}px,${f(g.ay)}px)}${at(e)}{transform:translate(${f(g.ax)}px,${f(g.ay)}px)}`;
+    hero += `${head}{transform:translateY(${f(g.L)}px)}${at(e)}{transform:translateY(${f(g.L)}px)}`;
 
-    if (k + 1 < n) {
-      anc +=
-        `${(spct(end) + EPS).toFixed(3)}%{transform:translate(${swings[k + 1].ax.toFixed(2)}px,${ANCHOR_Y}px)}` +
-        `${spct(Math.min(SP_TOTAL, at(k + 2)))}%{transform:translate(${swings[k + 1].ax.toFixed(2)}px,${ANCHOR_Y}px)}`;
-      // reel the web in to the next length over the tail of this swing
-      len += `${spct(end)}%{transform:scale(1,${nextL.toFixed(2)})}` +
-             `${spct(tail(k + 1))}%{transform:scale(1,${nextL.toFixed(2)})}`;
-      hero += `${spct(end)}%{transform:translateY(${nextL.toFixed(2)}px)}` +
-              `${spct(tail(k + 1))}%{transform:translateY(${nextL.toFixed(2)}px)}`;
-    }
+    pendulumKeys(-g.ain, g.aout, ROT_KF).forEach(([p, a], i) => {
+      rot += `${i === 0 ? head : at(s + p * d)}{transform:rotate(${cssDeg(a)}deg)}`;
+    });
+
+    // the web shoots out of the free hand at the start of every leg
+    len += `${head}{transform:scale(1,0)}${at(thwip)}{transform:scale(1,${f(g.L)})}${at(e)}{transform:scale(1,${f(g.L)})}`;
+    web += `${head}{opacity:0}${at(thwip)}{opacity:1}` +
+           (g.exit ? `${at(letgo)}{opacity:1}${at(letgo + d * 0.06)}{opacity:0}${at(e)}{opacity:0}`
+                   : `${at(e)}{opacity:1}`);
+
+    // he is on the panel for the whole leg, and tumbles off it at a pass end
+    fig += `${head}{opacity:0}${at(s + d * 0.1)}{opacity:1}` +
+           (g.exit && k < n - 1 ? `${at(e - d * 0.14)}{opacity:1}${at(e)}{opacity:0}` : `${at(e)}{opacity:1}`);
+
+    spin += `${head}{transform:rotate(0deg)}` +
+            (g.exit ? `${at(letgo)}{transform:rotate(0deg)}${at(e)}{transform:rotate(360deg)}`
+                    : `${at(e)}{transform:rotate(0deg)}`);
+
+    arm += `${head}{transform:rotate(0deg)}${at(e)}{transform:rotate(0deg)}`;
+
+    // alternating hands: one pose grips and trails, the other has just fired
+    for (const v of [0, 1])
+      hnd[v] += `${head}{opacity:${g.hand === v ? 1 : 0}}${at(e)}{opacity:${g.hand === v ? 1 : 0}}`;
+  });
+
+  /* --- the bow: he turns upside down on the last web and waves ---------- */
+  const last0 = legs[n - 1];
+  const hs = timing.start[n - 1] + timing.dur[n - 1];
+  const flip = hs + 0.95;                                  // done turning over
+  const wave0 = flip + 0.55;
+  anc += `${at(hs + HOLD_T)}{transform:translate(${f(last0.ax)}px,${f(last0.ay)}px)}`;
+  // still on the web at the apex, so he swings back down and rings out under
+  // the anchor before settling - a dead stop mid-arc would look pinned
+  rot += `${at(hs + 0.62)}{transform:rotate(${cssDeg(-last0.aout * 0.34)}deg)}` +
+         `${at(hs + 1.1)}{transform:rotate(${cssDeg(last0.aout * 0.13)}deg)}` +
+         `${at(hs + 1.5)}{transform:rotate(0deg)}` +
+         `${at(hs + HOLD_T)}{transform:rotate(0deg)}`;
+  len += `${at(hs + HOLD_T)}{transform:scale(1,${f(last0.L)})}`;
+  hero += `${at(hs + HOLD_T)}{transform:translateY(${f(last0.L)}px)}`;
+  web += `${at(hs + HOLD_T)}{opacity:1}`;
+  fig += `${at(hs + HOLD_T)}{opacity:1}`;
+  spin += `${at(hs + 0.3)}{transform:rotate(0deg)}${at(flip)}{transform:rotate(180deg)}` +
+          `${at(hs + HOLD_T)}{transform:rotate(180deg)}`;
+  arm += `${at(wave0)}{transform:rotate(0deg)}`;
+  for (let i = 0; i < 4; i++) {
+    arm += `${at(wave0 + 0.2 + i * 0.4)}{transform:rotate(-46deg)}` +
+           `${at(wave0 + 0.4 + i * 0.4)}{transform:rotate(14deg)}`;
   }
-  rot += `100%{transform:rotate(${SW_A}deg)}`;
-  anc += `100%{transform:translate(${swings[n - 1].ax.toFixed(2)}px,${ANCHOR_Y}px)}`;
-  len += `100%{transform:scale(1,${swings[n - 1].L.toFixed(2)})}`;
-  hero += `100%{transform:translateY(${swings[n - 1].L.toFixed(2)}px)}`;
+  arm += `${at(hs + HOLD_T)}{transform:rotate(0deg)}`;
+  for (const v of [0, 1]) hnd[v] += `${at(hs + HOLD_T)}{opacity:${last0.hand === v ? 1 : 0}}`;
 
+  anc += `100%{transform:translate(${f(last0.ax)}px,${f(last0.ay)}px)}`;
+  rot += `100%{transform:rotate(0deg)}`;
+  len += `100%{transform:scale(1,${f(last0.L)})}`;
+  hero += `100%{transform:translateY(${f(last0.L)}px)}`;
+  spin += `100%{transform:rotate(180deg)}`;
+  web += `100%{opacity:1}`;
+  fig += `100%{opacity:1}`;
+  arm += `100%{transform:rotate(0deg)}`;
+  for (const v of [0, 1]) hnd[v] += `100%{opacity:${last0.hand === v ? 1 : 0}}`;
+
+  return `@keyframes wanc{${anc}}@keyframes wrot{${rot}}@keyframes wlen{${len}}` +
+    `@keyframes whero{${hero}}@keyframes wspin{${spin}}@keyframes wweb{${web}}` +
+    `@keyframes wfig{${fig}}@keyframes warm{${arm}}@keyframes hnd0{${hnd[0]}}@keyframes hnd1{${hnd[1]}}`;
+}
+
+/**
+ * One throw per commit.
+ *
+ * He snatches the whole lit window off the facade and lobs it into the web in
+ * the corner, where it stays - so the counter is not the only thing telling
+ * you how far along he is, the web itself fills up. The mid-flight keyframe
+ * sits above the straight line between the two so it reads as a throw rather
+ * than a slide. Each commit needs its own delta, so this is one keyframes
+ * block per commit; it is the biggest thing in the file and worth it.
+ */
+function throwCSS(i, t, dx, dy) {
+  const r = (v) => Math.round(v);
+  const land = `translate(${r(dx)}px,${r(dy)}px) scale(.3)`;
   return (
-    `@keyframes wrot{${rot}}@keyframes wanc{${anc}}` +
-    `@keyframes wlen{${len}}@keyframes whero{${hero}}`
+    `@keyframes f${i}{0%,${spct(t)}%{transform:none;opacity:1}` +
+    `${spct(t + 0.11)}%{transform:translateY(-6px) scale(1.32)}` +
+    `${spct(t + 0.34)}%{transform:translate(${r(dx * 0.52)}px,${r(dy * 0.52 - 26)}px) scale(.72)}` +
+    `${spct(t + 0.62)}%{transform:${land};opacity:1}` +
+    `${spct(t + 0.72)}%,100%{transform:${land};opacity:.5}}` +
+    `.f${i}{animation-name:f${i}}`
   );
 }
 
-// a rescued civilian lifts off the facade and fades, instead of just blinking out
-const rescueBucket = (t) =>
-  Math.max(0, Math.min(SP_BUCKETS - 1, Math.floor(((t - SP_IN) / SP_PLAY) * SP_BUCKETS)));
-
-function rescueCSS() {
-  let css = "";
-  for (let b = 0; b < SP_BUCKETS; b++) {
-    const t = SP_IN + (b / SP_BUCKETS) * SP_PLAY;
-    css +=
-      `@keyframes rsc${b}{0%,${spct(t)}%{transform:translateY(0);opacity:1}` +
-      `${spct(t + 0.55)}%,100%{transform:translateY(-26px);opacity:0}}` +
-      `.rsc${b}{animation-name:rsc${b}}`;
+// the web in the corner: spokes out from the middle, straight runs between
+// them for the spiral, and a few guy lines out to the panel edge
+function netSVG(t) {
+  const N = 9;
+  const pt = (i, k) => {
+    const a = ((i % N) / N) * Math.PI * 2 - Math.PI / 2;
+    return [NET_X + Math.cos(a) * NET_R * k, NET_Y + Math.sin(a) * NET_R * k];
+  };
+  let d = "";
+  for (let i = 0; i < N; i++) {
+    const [x, y] = pt(i, 1);
+    d += `M${NET_X.toFixed(1)} ${NET_Y.toFixed(1)}L${x.toFixed(1)} ${y.toFixed(1)}`;
   }
-  return css;
+  for (let k = 0.3; k < 1.02; k += 0.235)
+    for (let i = 0; i <= N; i++) {
+      const [x, y] = pt(i, k);
+      d += `${i ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`;
+    }
+  const guy =
+    `M${NET_X} ${NET_Y - NET_R}L${NET_X - 12} 0M${NET_X} ${NET_Y - NET_R}L${NET_X + 30} 0` +
+    `M${NET_X + NET_R} ${NET_Y}L${W} ${NET_Y - 18}M${NET_X + NET_R} ${NET_Y}L${W} ${NET_Y + 26}`;
+  return (
+    `<g opacity=".72"><path d="${guy}" fill="none" stroke="${t.web}" stroke-width=".9" opacity=".45"/>` +
+    `<path d="${d}" fill="none" stroke="${t.web}" stroke-width="1.05" stroke-linejoin="round" opacity=".6"/></g>`
+  );
 }
 
 // relative luminance, so a civilian is dark on a bright window and light on a
@@ -754,24 +936,29 @@ function lum(hex) {
 }
 
 /* --------------------------------------------------------- the hero */
-// ~21px tall, drawn hanging from the web: local origin is the gripping hand,
-// so the whole figure rotates with the swing and leans into it for free.
-function slinger(t) {
+// ~24px from grip to boot, local origin at the gripping hand so he leans into
+// every swing for free. Two poses: `free` is the arm that is NOT on the web -
+// trailing on one leg, still out from firing on the next.
+function figure(t, v) {
+  const freeArm =
+    `<g class="warm">` +
+    (v === 0
+      ? `<path d="M1.6 9 L-4.6 13.2" stroke="${t.suitDark}" stroke-width="2.3" stroke-linecap="round" fill="none"/>`
+      : `<path d="M1.6 9 L8.2 4.6" stroke="${t.suitDark}" stroke-width="2.3" stroke-linecap="round" fill="none"/>`) +
+    `</g>`;
+  const legs =
+    v === 0
+      ? `<path d="M2.7 17.2 L-1.4 20.3 L-5.8 22.4" stroke="${t.tightsDark}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>` +
+        `<path d="M2.7 17.2 L6.7 19.4 L5.4 24" stroke="${t.tights}" stroke-width="2.9" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`
+      : `<path d="M2.7 17.2 L-2.2 19.2 L-6.4 21.6" stroke="${t.tightsDark}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>` +
+        `<path d="M2.7 17.2 L5.2 21.2 L2.6 24.6" stroke="${t.tights}" stroke-width="2.9" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`;
   return (
-    `<g class="wh">` +
-    // far arm, mid-thwip - darker so it reads as behind the chest
-    `<path d="M1.6 9 L-4.4 13.4" stroke="${t.suitDark}" stroke-width="2.3" stroke-linecap="round" fill="none"/>` +
-    // gripping arm, straight up the web
+    `<g class="h${v}">` +
+    freeArm +
     `<path d="M0 0 L1.6 9" stroke="${t.suit}" stroke-width="2.4" stroke-linecap="round" fill="none"/>` +
-    // legs, tucked and trailing
-    `<g class="kick">` +
-    `<path d="M2.7 17.2 L-1.4 20.3 L-5.8 22.4" stroke="${t.tightsDark}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>` +
-    `<path d="M2.7 17.2 L6.7 19.4 L5.4 24" stroke="${t.tights}" stroke-width="2.9" stroke-linecap="round" stroke-linejoin="round" fill="none"/>` +
-    `</g>` +
-    // chest into trunks
+    `<g class="kick">${legs}</g>` +
     `<path d="M1.6 9 L2.3 13.6" stroke="${t.suit}" stroke-width="5.2" stroke-linecap="round" fill="none"/>` +
     `<path d="M2.3 13.6 L2.7 17.2" stroke="${t.tights}" stroke-width="4.8" stroke-linecap="round" fill="none"/>` +
-    // head + mask lenses, facing the way he is going
     `<circle cx="3.9" cy="7.4" r="2.9" fill="${t.suit}"/>` +
     `<path d="M6.2 5.9 L4.0 6.7 L4.6 8.3 L6.5 7.5 Z" fill="${t.lens}"/>` +
     `<path d="M3.4 6.9 L1.9 7.4 L2.4 8.8 L3.8 8.2 Z" fill="${t.lens}" opacity=".8"/>` +
@@ -782,22 +969,26 @@ function slinger(t) {
 /* ------------------------------------------------------------- panel */
 function renderSwing(grid, theme) {
   const t = THEMES[theme];
-  const rng = makeRng(seedFrom(grid, 83));
-  const swings = swingPlan(grid, rng);
-  const timing = swingTiming(swings);
-  const traj = swingTrajectory(swings, timing);
-  const seen = rescueVisits(grid, traj);
+  const legs = planRoute(grid, makeRng(seedFrom(grid, 83)));
+  const timing = legTiming(legs);
+
+  const seen = new Map();
+  legs.forEach((g, k) => {
+    for (const [k2, p] of g.hit) seen.set(k2, timing.start[k] + p * timing.dur[k]);
+  });
 
   let total = 0;
   for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) if (grid[c][r]) total++;
 
-  /* --- the facade: empty windows, then the lit ones with people in --- */
   let base = "";
   for (let c = 0; c < COLS; c++)
     for (let r = 0; r < ROWS; r++)
       base += `<rect x="${GX + c * P}" y="${SGY + r * P}" width="${CELL}" height="${CELL}" rx="2.5" fill="${t.empty}"/>`;
 
+  const nrng = makeRng(seedFrom(grid, 131));
   let windows = "";
+  let throwCss = "";
+  let idx = 0;
   for (let c = 0; c < COLS; c++)
     for (let r = 0; r < ROWS; r++) {
       const lvl = grid[c][r];
@@ -805,22 +996,26 @@ function renderSwing(grid, theme) {
       const x = GX + c * P;
       const y = SGY + r * P;
       const civ = lum(t.levels[lvl]) > 0.42 ? t.civDark : t.civLight;
-      const i = seen.get(key(c, r));
-      const cls =
-        i === undefined
-          ? ""
-          : ` class="cell rsc${rescueBucket(i)}"`;
+      const caught = seen.get(key(c, r));
+      let cls = "";
+      if (caught !== undefined) {
+        // scatter the landings over the web so they read as a bundle of people
+        // caught in it rather than a single stacked blob
+        const a = nrng() * Math.PI * 2;
+        const k = Math.sqrt(nrng()) * (NET_R - 8);
+        cls = ` class="cell f${idx}"`;
+        throwCss += throwCSS(idx, caught, NET_X + Math.cos(a) * k - (x + 6), NET_Y + Math.sin(a) * k - (y + 6));
+        idx++;
+      }
       windows +=
-        `<g${cls}>` +
+        `<g${cls} style="transform-origin:${x + 6}px ${y + 6}px">` +
         `<rect x="${x}" y="${y}" width="${CELL}" height="${CELL}" rx="2.5" fill="${t.levels[lvl]}"/>` +
-        // a civilian at the window, arms up
         `<circle cx="${x + 6}" cy="${y + 4}" r="1.45" fill="${civ}" opacity=".66"/>` +
         `<path d="M${x + 3.7} ${y + 5.6} L${x + 6} ${y + 7.2} L${x + 8.3} ${y + 5.6} M${x + 6} ${y + 7.2} L${x + 6} ${y + 9.6}" ` +
         `stroke="${civ}" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity=".66"/>` +
         `</g>`;
     }
 
-  /* --- the street below, just enough to place the facade ------------- */
   const srng = makeRng(seedFrom(grid, 97));
   const groundY = SGY + GRID_H + 30;
   let skyline = "";
@@ -836,19 +1031,18 @@ function renderSwing(grid, theme) {
   }
   skyline = `<g opacity=".45">${skyline}<rect x="0" y="${groundY}" width="${W}" height="1.2" fill="${t.frame}" opacity=".6"/></g>`;
 
-  /* --- rescued counter, ticking up as he clears the facade ----------- */
   const visits = [...seen.values()].sort((a, b) => a - b);
   let hud = "";
   let hudCSS = "";
   for (let i = 0; i < HUD_STEPS; i++) {
     const p0 = i / HUD_STEPS;
     const p1 = (i + 1) / HUD_STEPS;
-    const cut = SP_IN + ((p0 + p1) / 2) * SP_PLAY;   // read the count mid-window
+    const cut = SP_IN + ((p0 + p1) / 2) * SP_PLAY;
     let n = 0;
     while (n < visits.length && visits[n] <= cut) n++;
     const a = i === 0 ? 0 : spct(SP_IN + p0 * SP_PLAY);
     const b = i === HUD_STEPS - 1 ? 100 : spct(SP_IN + p1 * SP_PLAY);
-    hud += `<text class="hud hb${i}" x="${W - 20}" y="28" text-anchor="end">rescued ${n}/${total}</text>`;
+    hud += `<text class="hud hb${i}" x="${GX}" y="72">rescued ${n}/${total}</text>`;
     hudCSS +=
       `@keyframes hb${i}{` +
       (i === 0 ? `0%,${b}%{opacity:1}` : `0%,${a}%{opacity:0}${(a + 0.004).toFixed(3)}%,${b}%{opacity:1}`) +
@@ -856,14 +1050,13 @@ function renderSwing(grid, theme) {
       `.hb${i}{animation-name:hb${i}}`;
   }
 
-  /* --- anchors: a web splat wherever he grabs on -------------------- */
-  const splat =
+  const rig =
     `<g class="wa">` +
-    `<circle cx="0" cy="0" r="3" fill="${t.web}" opacity=".55"/>` +
-    `<path d="M-5 -2 L0 0 M5 -2 L0 0 M0 -5.5 L0 0" stroke="${t.web}" stroke-width="1" stroke-linecap="round" opacity=".4" fill="none"/>` +
+    `<g class="wk"><circle cx="0" cy="0" r="2.8" fill="${t.web}" opacity=".5"/>` +
+    `<path d="M-4.6 -2 L0 0 M4.6 -2 L0 0 M0 -5 L0 0" stroke="${t.web}" stroke-width="1" stroke-linecap="round" opacity=".35" fill="none"/></g>` +
     `<g class="wr">` +
     `<g class="wl"><rect x="-.65" y="0" width="1.3" height="1" fill="${t.web}" opacity=".72"/></g>` +
-    slinger(t) +
+    `<g class="wh"><g class="wsp"><g class="wfig">${figure(t, 0)}${figure(t, 1)}</g></g></g>` +
     `</g></g>`;
 
   const barW = 150;
@@ -873,46 +1066,55 @@ function renderSwing(grid, theme) {
     `<rect class="sprog" x="${W / 2 - barW / 2}" y="${barY}" width="${barW}" height="2.5" rx="1.25" fill="${t.accent}"/>`;
 
   const css = `
-    .cell,.wa,.wr,.wl,.wh,.hud,.sprog,.lf{animation-duration:${SP_TOTAL}s;animation-iteration-count:infinite;animation-timing-function:linear}
-    .wa,.wr,.wl,.wh,.sprog{transform-box:view-box;transform-origin:0 0}
-    .wa{animation-name:wanc}.wr{animation-name:wrot}.wl{animation-name:wlen}.wh{animation-name:whero}
-    .kick{animation:kick 1.15s ease-in-out infinite;transform-box:view-box;transform-origin:2.7px 17.2px}
+    .cell,.wa,.wr,.wl,.wh,.wsp,.wk,.wfig,.warm,.h0,.h1,.hud,.sprog,.lf{animation-duration:${SP_TOTAL}s;animation-iteration-count:infinite;animation-timing-function:linear}
+    .wa,.wr,.wl,.wh,.wsp,.warm,.sprog,.cell{transform-box:view-box;transform-origin:0 0}
+    .warm{animation-name:warm;transform-origin:1.6px 9px}
+    .wa{animation-name:wanc}.wr{animation-name:wrot}
+    .wl{animation-name:wlen,wweb}.wk{animation-name:wweb}
+    .wh{animation-name:whero}.wfig{animation-name:wfig}
+    /* Pivot halfway down the body, on the web's own axis: a 180 turn then
+       lands his boots exactly where the web ends and drops his head below it,
+       which is the pose. Pivoting on the chest instead leaves the line
+       attached to his ribs. It doubles as the centre for the somersaults. */
+    .wsp{animation-name:wspin;transform-origin:0px 12px}
+    .h0{animation-name:hnd0}.h1{animation-name:hnd1}
+    .kick{animation:kick 1.1s ease-in-out infinite;transform-box:view-box;transform-origin:2.7px 17.2px}
     @keyframes kick{0%,100%{transform:rotate(-7deg)}50%{transform:rotate(9deg)}}
     .lf{animation-name:lf}
-    @keyframes lf{0%{opacity:0}2.5%,97%{opacity:1}100%{opacity:0}}
+    @keyframes lf{0%{opacity:0}1.8%,97.5%{opacity:1}100%{opacity:0}}
     .sprog{transform-origin:${W / 2 - barW / 2}px 0;animation-name:sprog}
     @keyframes sprog{0%{transform:scaleX(0)}100%{transform:scaleX(1)}}
     .ttl{font:700 17px "Cascadia Code","JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;fill:${t.accent}}
     .sub{font:400 11.5px "Cascadia Code","JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;fill:${t.muted}}
     .hud{font:700 13px "Cascadia Code","JetBrains Mono",ui-monospace,monospace;fill:${t.suit};opacity:0}
     .hint{font:400 10px "Cascadia Code",ui-monospace,monospace;fill:${t.muted}}
-    ${swingRigCSS(swings, timing)}
-    ${rescueCSS()}
+    ${rigCSS(legs, timing)}
+    ${throwCss}
     ${hudCSS}
     @media (prefers-reduced-motion:reduce){
-      .cell,.wa,.wr,.wl,.wh,.hud,.sprog,.lf,.kick{animation:none}
-      .lf{opacity:1}.cell{opacity:1}
-      .hb0{opacity:1}
+      .cell,.wa,.wr,.wl,.wh,.wsp,.wk,.wfig,.warm,.h0,.h1,.hud,.sprog,.lf,.kick{animation:none}
+      .lf{opacity:1}.cell{opacity:1}.hb0{opacity:1}.h1{opacity:0}
       .sprog{transform:scaleX(0)}
-      .wa{transform:translate(${swings[0].ax.toFixed(2)}px,${ANCHOR_Y}px)}
-      .wr{transform:rotate(-${SW_A}deg)}
-      .wl{transform:scale(1,${swings[0].L.toFixed(2)})}
-      .wh{transform:translateY(${swings[0].L.toFixed(2)}px)}
+      .wa{transform:translate(${legs[0].ax.toFixed(2)}px,${legs[0].ay.toFixed(2)}px)}
+      .wr{transform:rotate(${legs[0].ain.toFixed(2)}deg)}
+      .wl{transform:scale(1,${legs[0].L.toFixed(2)})}
+      .wh{transform:translateY(${legs[0].L.toFixed(2)}px)}
     }
   `.replace(/\s*\n\s*/g, "");
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${SP_H}" viewBox="0 0 ${W} ${SP_H}" role="img" aria-label="A web-slinger swings across my GitHub contribution graph, rescuing each commit like a civilian">
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${SP_H}" viewBox="0 0 ${W} ${SP_H}" role="img" aria-label="A web-slinger swings left to right across my GitHub contribution graph, rescuing every commit like a civilian at a window">
 <style>${css}</style>
 <rect width="${W}" height="${SP_H}" rx="14" fill="${t.bg}"/>
 <rect x=".75" y=".75" width="${W - 1.5}" height="${SP_H - 1.5}" rx="13.5" fill="none" stroke="${t.frame}" stroke-width="1.5" opacity=".55"/>
 <g class="lf">
 ${skyline}
+${netSVG(t)}
 ${base}
 ${windows}
-${splat}
+${rig}
 </g>
 <text class="ttl" x="${GX}" y="28">&gt; ./play spiderman.sh</text>
-<text class="sub" x="${GX}" y="45">every commit is a civilian at a window - he swings by and gets them out</text>
+<text class="sub" x="${GX}" y="45">hand over hand across the facade - every commit gets caught and thrown into the web</text>
 ${hud}
 ${bar}
 <text class="hint" x="${W - 20}" y="${SP_H - 12}" text-anchor="end">pure css - no javascript - ${SP_TOTAL}s loop</text>
