@@ -18,6 +18,20 @@
 
 ---
 
+## 🕷️ spiderman.sh — <sub>(the rescue run · same contribution data)</sub>
+
+<p align="center">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/tahabahar/tahabahar/arcade/spiderman-dark.svg"/>
+<source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/tahabahar/tahabahar/arcade/spiderman-light.svg"/>
+<img src="https://raw.githubusercontent.com/tahabahar/tahabahar/arcade/spiderman-dark.svg" alt="a web-slinger swings across my contribution graph, pulling every commit out of its window" width="96%"/>
+</picture>
+</p>
+
+<p align="center"><sub>every commit is a civilian at a window — he swings the facade and gets them out, one arc at a time</sub></p>
+
+---
+
 <table align="center">
 <tr>
 <td width="230" align="center" valign="middle">
