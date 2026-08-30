@@ -767,6 +767,10 @@ function planRoute(grid, rng) {
       const ay = rowY - L;
       if (ay < ANCHOR_MIN_Y - 90) continue;
       const ax = lx + L * Math.sin(rad(ain));
+      // the bow has to happen on camera: park him clear of both edges, or a
+      // graph whose last commits sit far right leaves him hanging half behind
+      // the panel border
+      if (ax > W - 62 || ax < GX + 30) continue;
       for (const aout of AOUT) {
         const g = { ax, ay, L, ain, aout, row };
         // he settles at the BOTTOM of this arc, not at the apex he stops on,
