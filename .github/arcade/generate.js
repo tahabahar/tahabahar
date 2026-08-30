@@ -563,12 +563,24 @@ const NET_Y = 58;
 const NET_R = 44;
 
 /* ------------------------------------------------------------ timing */
-const SP_TOTAL = 28;
-const SP_IN = 0.5;
-const SP_OUT = 3.8;                  // he hangs off the last web and takes a bow
-const SP_PLAY = SP_TOTAL - SP_IN - SP_OUT;
-const SP_GAP = 0.4;                  // he is off the panel between passes
-const HOLD_T = 3.3;                  // upside down by the net at the end
+/**
+ * Tempo is set per swing, not per loop.
+ *
+ * SWING_T is the dial: how long an average swing takes. Everything else -
+ * including how long the whole panel runs - is derived from it once the route
+ * is known, so a sparser contribution year plans fewer legs and simply loops
+ * sooner instead of speeding him up. Fixing the loop length and dividing it
+ * by the leg count is what makes the tempo drift with the data.
+ */
+const SWING_T = 0.86;                // seconds for an average swing
+const SP_IN = 0.6;                   // beat before he drops into frame
+const SP_GAP = 0.42;                 // he is off the panel between passes
+const HOLD_T = 3.6;                  // upside down by the web at the end
+const SP_TAIL = 0.8;                 // and a breath on the empty facade
+
+// filled in by legTiming(), which is the only thing that knows the route
+let SP_TOTAL = 30;
+let SP_PLAY = 26;
 const spct = (t) => +((t / SP_TOTAL) * 100).toFixed(3);
 
 /* -------------------------------------------------------------- swing */
@@ -581,7 +593,7 @@ const ANCHOR_MIN_Y = -155;           // webs may leave the frame, but not absurd
 const ARC_STEPS = 34;
 const ROT_KF = 8;
 const LEG_MAX = 60;
-const PASS_MAX = 8;
+const PASS_MAX = 14;
 const SP_BUCKETS = 128;
 const HUD_STEPS = 22;
 
@@ -722,10 +734,13 @@ function planRoute(grid, rng) {
       legs.push(g);
       prev = g;
       if (best.rx2 > RIGHT) break;                        // off the right edge: pass over
-      // two empty swings in a row means this line is spent - break off and come
-      // back in somewhere useful rather than ride out an emptied facade
+      // Two empty swings in a row means this line is spent - break off and come
+      // back in somewhere useful rather than ride out an emptied facade. Once
+      // it is down to the last stragglers give him more rope, because those
+      // take a couple of dry swings to line up and there is nothing else left
+      // to do with the time.
       dry = g.hit.size ? 0 : dry + 1;
-      if (dry >= 2) break;
+      if (dry >= (left.size > 15 ? 2 : 4)) break;
       if (![...left.values()].some((c) => c.x > best.rx2 - 30)) break;
     }
 
@@ -775,11 +790,15 @@ function planRoute(grid, rng) {
 // a pendulum's period goes with sqrt(L), and a leg is the slice of it the arc
 // actually covers - so short whips stay snappy and long sags take their time
 function legTiming(legs) {
-  const gaps = legs.filter((l) => l.exit).length;
-  const play = SP_PLAY - Math.max(0, gaps) * SP_GAP;
-  const w = legs.map((l) => Math.sqrt(l.L) * ((l.ain + l.aout) / 76));
-  const sum = w.reduce((a, b) => a + b, 0);
-  const dur = w.map((x) => (x / sum) * play);
+  // A pendulum's period goes with sqrt(L) and a leg is the slice of it the arc
+  // covers, so long sags take their time and short whips stay snappy. The floor
+  // keeps a clean-up swing from flicking past unread. Scaling by the MEAN, not
+  // the sum, is what pins the tempo: the average leg lasts SWING_T whether the
+  // route came out at twenty legs or fifty.
+  const w = legs.map((l) => Math.max(7, Math.sqrt(l.L) * ((l.ain + l.aout) / 76)));
+  const mean = w.reduce((a, b) => a + b, 0) / w.length;
+  const dur = w.map((x) => (x / mean) * SWING_T);
+
   const start = [];
   let acc = SP_IN;
   legs.forEach((l, k) => {
@@ -787,6 +806,9 @@ function legTiming(legs) {
     acc += dur[k];
     if (l.exit && k < legs.length - 1) acc += SP_GAP;
   });
+
+  SP_PLAY = acc - SP_IN;
+  SP_TOTAL = +(SP_IN + SP_PLAY + HOLD_T + SP_TAIL).toFixed(2);
   return { dur, start };
 }
 
@@ -1117,7 +1139,7 @@ ${rig}
 <text class="sub" x="${GX}" y="45">hand over hand across the facade - every commit gets caught and thrown into the web</text>
 ${hud}
 ${bar}
-<text class="hint" x="${W - 20}" y="${SP_H - 12}" text-anchor="end">pure css - no javascript - ${SP_TOTAL}s loop</text>
+<text class="hint" x="${W - 20}" y="${SP_H - 12}" text-anchor="end">pure css - no javascript - ${Math.round(SP_TOTAL)}s loop</text>
 </svg>`;
 }
 
