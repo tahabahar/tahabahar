@@ -572,7 +572,10 @@ const NET_R = 44;
  * sooner instead of speeding him up. Fixing the loop length and dividing it
  * by the leg count is what makes the tempo drift with the data.
  */
-const SWING_T = 0.86;                // seconds for an average swing
+const SWING_T = 0.86;                // seconds for the average swing ITSELF
+const E0 = 0.22;                     // energy left at the apex: he never quite stops
+const FLY_FRAC = 0.3;                // share of a cycle spent off the web
+const W_REF = 10.4;                  // a typical leg weight, so the dial lands where it says
 const SP_IN = 0.6;                   // beat before he drops into frame
 const SP_GAP = 0.42;                 // he is off the panel between passes
 const HOLD_T = 3.6;                  // upside down by the web at the end
@@ -584,7 +587,7 @@ let SP_PLAY = 26;
 const spct = (t) => +((t / SP_TOTAL) * 100).toFixed(3);
 
 /* -------------------------------------------------------------- swing */
-const REACH = 15;                    // how close he passes to grab someone
+const REACH = 19;                    // how close he passes to grab someone
 const AIN = [20, 26, 32, 38, 44, 50];        // how far behind he grabs on
 const AOUT = [22, 28, 34, 40, 46];           // how far ahead he lets go
 const L_MIN = 70;
@@ -593,7 +596,7 @@ const ANCHOR_MIN_Y = -155;           // webs may leave the frame, but not absurd
 const ARC_STEPS = 34;
 const ROT_KF = 8;
 const LEG_MAX = 60;
-const PASS_MAX = 14;
+const PASS_MAX = 16;
 const SP_BUCKETS = 128;
 const HUD_STEPS = 22;
 
@@ -617,31 +620,82 @@ const cssDeg = (a) => (-a).toFixed(2);
  * the arc so he slows almost to a stop at each apex without stalling - which
  * is exactly the beat between one web and the next.
  */
-function pendulumKeys(a0, a1, n) {
-  const tmax = Math.max(Math.abs(a0), Math.abs(a1)) + 1.6;
-  const cmax = Math.cos(rad(tmax));
+/**
+ * Angular speed on the rope, normalised.
+ *
+ * Conservation of energy on a pendulum grabbed at -ain: v^2 goes with
+ * (E0 + cos t - cos ain). E0 is what he carries into the grab, and it is what
+ * stops him hanging motionless at either apex - with E0 = 0 the arc stalls at
+ * both ends and the run reads as a series of separate lunges rather than one
+ * continuous swing. It also caps how high he can get: he cannot reach an angle
+ * where the bracket would go negative, which is why the planner has to check.
+ */
+const omega = (th, ain) =>
+  Math.sqrt(Math.max(4e-3, E0 + Math.cos(rad(th)) - Math.cos(rad(ain))));
+
+const reachable = (ain, aout) => E0 + Math.cos(rad(aout)) - Math.cos(rad(ain)) > 0.02;
+
+/**
+ * theta(t) across one swing, plus the constant that turns it into real speed.
+ *
+ * Integrating dt = dtheta/omega and reading the result back at equal time steps
+ * gives the angles to hang keyframes on. tnorm - the integral - is also what
+ * converts the shape into physics: with the swing lasting d seconds, the rope's
+ * angular speed is omega * tnorm/d, so the launch speed and the gravity implied
+ * by the swing both fall out of the same number. The flight that follows is
+ * then in the same world as the swing that threw him, instead of being a
+ * second animation with its own made-up constants.
+ */
+function pendulumProfile(ain, aout, n) {
   const STEPS = 180;
-  const dth = (a1 - a0) / STEPS;
+  const dth = (ain + aout) / STEPS;
   const ts = [0];
-  for (let i = 0; i < STEPS; i++) {
-    const th = a0 + dth * (i + 0.5);
-    ts.push(ts[i] + Math.abs(dth) / Math.sqrt(Math.max(0.004, Math.cos(rad(th)) - cmax)));
-  }
+  for (let i = 0; i < STEPS; i++)
+    ts.push(ts[i] + dth / omega(-ain + dth * (i + 0.5), ain));
   const T = ts[STEPS];
-  const out = [];
+  const keys = [];
   for (let k = 0; k <= n; k++) {
     const want = (k / n) * T;
     let i = 0;
     while (i < STEPS - 1 && ts[i + 1] < want) i++;
     const f = (want - ts[i]) / (ts[i + 1] - ts[i] || 1);
-    out.push([k / n, a0 + dth * (i + f)]);
+    keys.push([k / n, -ain + dth * (i + f)]);
   }
-  return out;
+  return { keys, tnorm: T };
+}
+
+const legWeight = (L, ain, aout) => Math.max(7, Math.sqrt(L) * ((ain + aout) / 76));
+// SWING_T times how the arc compares to a typical one, then grossed up for the
+// fall that follows - so the dial keeps meaning "how long a swing takes to
+// watch" no matter how much of each cycle is spent off the web
+const legDur = (l) =>
+  ((legWeight(l.L, l.ain, l.aout) / W_REF) * SWING_T) / (1 - FLY_FRAC);
+
+/**
+ * What happens after he lets go.
+ *
+ * He leaves the rope along the tangent, so the launch direction is fixed by the
+ * release angle, and the speed and gravity both come from the swing itself. From
+ * there it is a plain projectile: he rises, gravity takes it back, and he is
+ * already falling when the next web goes out - which is the bit that was missing
+ * when the new rope simply appeared at the old one's apex.
+ */
+function flight(l) {
+  const d = legDur(l);
+  const ds = d * (1 - FLY_FRAC);
+  const df = d * FLY_FRAC;
+  const K = ((pendulumProfile(l.ain, l.aout, 1).tnorm / ds) * Math.PI) / 180;
+  const v = l.L * omega(l.aout, l.ain) * K;
+  const g = (l.L * K * K) / 2;
+  const vx = v * Math.cos(rad(l.aout));
+  const vy = -v * Math.sin(rad(l.aout));
+  const at = (t) => [vx * t, vy * t + 0.5 * g * t * t];
+  return { ds, df, g, v, at, end: at(df) };
 }
 
 // who this arc passes close enough to grab, and how far through the leg
 function sweep(g, left, byTime) {
-  const keys = byTime ? pendulumKeys(-g.ain, g.aout, ARC_STEPS) : null;
+  const keys = byTime ? pendulumProfile(g.ain, g.aout, ARC_STEPS).keys : null;
   const hit = new Map();
   for (let i = 0; i <= ARC_STEPS; i++) {
     const p = i / ARC_STEPS;
@@ -696,7 +750,10 @@ function planRoute(grid, rng) {
           let L;
           let ax;
           if (prev) {
-            const [rx, ry] = legPos(prev, prev.aout);
+            const [px, py] = legPos(prev, prev.aout);
+            const f = flight(prev);
+            const rx = px + f.end[0];
+            const ry = py + f.end[1];
             const drop = rowY - ry;
             if (drop < 3) continue;                       // an arc cannot climb to its own floor
             L = drop / (1 - Math.cos(rad(ain)));
@@ -710,6 +767,7 @@ function planRoute(grid, rng) {
           if (ay < ANCHOR_MIN_Y) continue;
 
           for (const aout of AOUT) {
+            if (!reachable(ain, aout)) continue;      // no energy to get that high
             const g = { ax, ay, L, ain, aout, row };
             const hit = sweep(g, left, false);
             const [rx2, ry2] = legPos(g, aout);
@@ -731,6 +789,8 @@ function planRoute(grid, rng) {
       g.pass = pass;
       g.hand = legs.length % 2;
       for (const k of g.hit.keys()) left.delete(k);
+      // exits get the showy one; the rest take pot luck from the library
+      g.air = g.exit ? 3 : Math.floor(rng() * AERIALS.length);
       legs.push(g);
       prev = g;
       if (best.rx2 > RIGHT) break;                        // off the right edge: pass over
@@ -754,7 +814,10 @@ function planRoute(grid, rng) {
   const last = legs[legs.length - 1];
   last.exit = false;
   let approach = null;
-  const [lx, ly] = legPos(last, last.aout);
+  const lf = flight(last);
+  const [lx0, ly0] = legPos(last, last.aout);
+  const lx = lx0 + lf.end[0];
+  const ly = ly0 + lf.end[1];
   for (let row = 0; row < ROWS; row++) {
     const rowY = scy(row);
     for (const ain of AIN) {
@@ -766,17 +829,25 @@ function planRoute(grid, rng) {
       if (L < L_MIN || L > 250) continue;
       const ay = rowY - L;
       if (ay < ANCHOR_MIN_Y - 90) continue;
-      const ax = lx + L * Math.sin(rad(ain));
-      // the bow has to happen on camera: park him clear of both edges, or a
-      // graph whose last commits sit far right leaves him hanging half behind
-      // the panel border
-      if (ax > W - 62 || ax < GX + 30) continue;
-      for (const aout of AOUT) {
-        const g = { ax, ay, L, ain, aout, row };
-        // he settles at the BOTTOM of this arc, not at the apex he stops on,
-        // so that is the point to park near the web
-        const cost = Math.hypot(g.ax - (NET_X - 18), g.ay + g.L - (NET_Y + 108));
-        if (!approach || cost < approach.cost) approach = { g, cost };
+      // The run always ends wherever the last pass dropped him, and every other
+      // leg puts its anchor AHEAD - so from the right edge there is no way back
+      // and the bow ends up half behind the panel border. The closing swing is
+      // the one place he may go the other way: anchor behind him, swinging back
+      // toward the middle. Mirroring is free, because a backward swing is just
+      // the forward profile with every angle negated.
+      for (const back of [false, true]) {
+        const ax = lx + (back ? -1 : 1) * L * Math.sin(rad(ain));
+        for (const aout of AOUT) {
+          if (!reachable(ain, aout)) continue;
+          const g = { ax, ay, L, ain, aout, row, back };
+          // he settles at the BOTTOM of this arc, not at the apex he stops on,
+          // so that is the point to park near the web
+          const rest = back ? ax - L * Math.sin(rad(aout)) : ax + L * Math.sin(rad(aout));
+          const off = Math.max(0, ax - (W - 66)) + Math.max(0, GX + 34 - ax) +
+                      Math.max(0, rest - (W - 30)) + Math.max(0, GX - rest);
+          const cost = Math.hypot(ax - (NET_X - 18), ay + L - (NET_Y + 108)) + off * 40;
+          if (!approach || cost < approach.cost) approach = { g, cost };
+        }
       }
     }
   }
@@ -785,6 +856,7 @@ function planRoute(grid, rng) {
     g.hit = new Map();
     g.pass = last.pass;
     g.hand = legs.length % 2;
+    g.air = 0;
     legs.push(g);
   }
   legs[legs.length - 1].bow = true;                       // the hold hangs off this one
@@ -795,13 +867,12 @@ function planRoute(grid, rng) {
 // actually covers - so short whips stay snappy and long sags take their time
 function legTiming(legs) {
   // A pendulum's period goes with sqrt(L) and a leg is the slice of it the arc
-  // covers, so long sags take their time and short whips stay snappy. The floor
-  // keeps a clean-up swing from flicking past unread. Scaling by the MEAN, not
-  // the sum, is what pins the tempo: the average leg lasts SWING_T whether the
-  // route came out at twenty legs or fifty.
-  const w = legs.map((l) => Math.max(7, Math.sqrt(l.L) * ((l.ain + l.aout) / 76)));
-  const mean = w.reduce((a, b) => a + b, 0) / w.length;
-  const dur = w.map((x) => (x / mean) * SWING_T);
+  // covers, so long sags take their time and short whips stay snappy; the floor
+  // keeps a clean-up swing from flicking past unread. This has to be the same
+  // formula the planner used, because the planner needed each leg's duration to
+  // work out how far the fall after it carries him.
+  const dur = legs.map(legDur);
+  const swing = legs.map((l, k) => (l.bow ? dur[k] : dur[k] * (1 - FLY_FRAC)));
 
   const start = [];
   let acc = SP_IN;
@@ -813,48 +884,109 @@ function legTiming(legs) {
 
   SP_PLAY = acc - SP_IN;
   SP_TOTAL = +(SP_IN + SP_PLAY + HOLD_T + SP_TAIL).toFixed(2);
-  return { dur, start };
+  return { dur, swing, start };
 }
+
+/**
+ * What he does with the airborne half of a cycle.
+ *
+ * `turns` is the only thing a move really chooses. Where it has to FINISH is
+ * fixed by continuity: he leaves the old rope leaning aout forward and has to
+ * meet the new one leaning ain back, so the tumble has to cover that difference
+ * on top of its whole turns. Ending on a tidy 360 instead leaves the body
+ * snapping through seventy-odd degrees the instant the next web catches - the
+ * position is continuous either way, which is exactly what makes it easy to
+ * miss. `turns: 0` is then not "no move" but a plain arch into the next rope.
+ */
+const AERIALS = [
+  { turns: 1, ease: (p) => p, tuck: 0 },                       // front flip
+  { turns: 1, ease: (p) => p, tuck: 0.22 },                    // tucked
+  { turns: -1, ease: (p) => p, tuck: 0 },                      // back flip
+  { turns: 2, ease: (p) => p, tuck: 0.18 },                    // double
+  { turns: 1, ease: (p) => p * p * (3 - 2 * p), tuck: 0 },     // lazy layout
+  { turns: 0, ease: (p) => p * p * (3 - 2 * p), tuck: 0.1 },   // no flip, just an arch
+];
+const AIR_STEPS = 5;
 
 /* --------------------------------------------------------------- css */
 function rigCSS(legs, timing) {
   const n = legs.length;
-  const EPS = 0.004;
+  // Half a millisecond. Everything the rig owns changes at a handover, and CSS
+  // has to ramp between two keyframes rather than cut, so for the width of this
+  // window the composite is briefly nonsense. Keeping it well under a frame is
+  // what stops that ever being drawn.
+  const EPS = 0.0012;
   const f = (v) => v.toFixed(2);
   const at = (t) => `${spct(t)}%`;
   const bump = (t) => `${(spct(t) + EPS).toFixed(3)}%`;
 
-  let anc = "", rot = "", len = "", hero = "", spin = "", web = "", fig = "", arm = "";
+  let anc = "", rot = "", len = "", hero = "", spin = "", web = "", fig = "", arm = "", fly = "";
+  // Whole turns done so far. The body angle is .wr plus .wsp, and at a handover
+  // both jump in the same instant - .wr forward by the lean, .wsp back by it -
+  // so they cancel. They only cancel at the endpoints though: if .wsp were reset
+  // to zero each leg the pair would also have to unwind the whole turns, and for
+  // the millisecond the two keyframes blend across, the body would whip through a
+  // full revolution. Carrying the turns forward means the only thing that ever
+  // has to cancel is the lean, and nothing is left to unwind.
+  let base = 0;
   const hnd = ["", ""];
 
   legs.forEach((g, k) => {
     const s = timing.start[k];
     const d = timing.dur[k];
+    const ds = timing.swing[k];
+    const rel = s + ds;                           // the moment he lets go
     const e = s + d;
     const head = k === 0 ? `0%,${at(s)}` : bump(s);
-    const thwip = s + d * 0.14;
-    const letgo = s + d * 0.5;                    // only used on an exit leg
+    const thwip = s + ds * 0.16;
+    const air = g.bow ? null : flight(g);
 
+    // the rope's anchor and length are frozen for the whole cycle - during the
+    // fall nothing of the rig is on screen anyway, and .wfly carries him
     anc += `${head}{transform:translate(${f(g.ax)}px,${f(g.ay)}px)}${at(e)}{transform:translate(${f(g.ax)}px,${f(g.ay)}px)}`;
     hero += `${head}{transform:translateY(${f(g.L)}px)}${at(e)}{transform:translateY(${f(g.L)}px)}`;
 
-    pendulumKeys(-g.ain, g.aout, ROT_KF).forEach(([p, a], i) => {
-      rot += `${i === 0 ? head : at(s + p * d)}{transform:rotate(${cssDeg(a)}deg)}`;
+    const sgn = g.back ? -1 : 1;
+    pendulumProfile(g.ain, g.aout, ROT_KF).keys.forEach(([p, a], i) => {
+      rot += `${i === 0 ? head : at(s + p * ds)}{transform:rotate(${cssDeg(sgn * a)}deg)}`;
     });
+    if (!g.bow) rot += `${at(e)}{transform:rotate(${cssDeg(sgn * g.aout)}deg)}`;
 
-    // the web shoots out of the free hand at the start of every leg
+    // the web shoots out of the free hand, and is let go of at the release
     len += `${head}{transform:scale(1,0)}${at(thwip)}{transform:scale(1,${f(g.L)})}${at(e)}{transform:scale(1,${f(g.L)})}`;
     web += `${head}{opacity:0}${at(thwip)}{opacity:1}` +
-           (g.exit ? `${at(letgo)}{opacity:1}${at(letgo + d * 0.06)}{opacity:0}${at(e)}{opacity:0}`
-                   : `${at(e)}{opacity:1}`);
+           (g.bow ? `${at(e)}{opacity:1}`
+                  : `${at(rel)}{opacity:1}${at(rel + d * 0.05)}{opacity:0}${at(e)}{opacity:0}`);
 
-    // he is on the panel for the whole leg, and tumbles off it at a pass end
-    fig += `${head}{opacity:0}${at(s + d * 0.1)}{opacity:1}` +
-           (g.exit && k < n - 1 ? `${at(e - d * 0.14)}{opacity:1}${at(e)}{opacity:0}` : `${at(e)}{opacity:1}`);
+    // the fall: a plain projectile, sampled so the CSS follows the parabola
+    // rather than cutting the corner across it
+    fly += `${head}{transform:none}${at(rel)}{transform:none}`;
+    if (air) {
+      for (let i = 1; i <= AIR_STEPS; i++) {
+        const [dx, dy] = air.at((i / AIR_STEPS) * air.df);
+        fly += `${at(rel + (i / AIR_STEPS) * (e - rel))}{transform:translate(${f(dx)}px,${f(dy)}px)}`;
+      }
+    } else fly += `${at(e)}{transform:none}`;
 
-    spin += `${head}{transform:rotate(0deg)}` +
-            (g.exit ? `${at(letgo)}{transform:rotate(0deg)}${at(e)}{transform:rotate(360deg)}`
-                    : `${at(e)}{transform:rotate(0deg)}`);
+    // he is on the panel for the whole cycle, and tumbles off it at a pass end
+    fig += `${head}{opacity:0}${at(s + ds * 0.1)}{opacity:1}` +
+           (g.exit && k < n - 1 ? `${at(e - d * 0.16)}{opacity:1}${at(e)}{opacity:0}` : `${at(e)}{opacity:1}`);
+
+    // and something different in the air each time, landing on the orientation
+    // the next rope needs so nothing snaps when it catches
+    spin += `${head}{transform:rotate(${f(base)}deg)}${at(rel)}{transform:rotate(${f(base)}deg)}`;
+    if (air) {
+      const mv = AERIALS[g.air];
+      const next = legs[k + 1];
+      const lean = g.exit || !next ? 0 : next.ain + g.aout;
+      const total = 360 * mv.turns + lean;
+      for (let i = 1; i <= AIR_STEPS; i++) {
+        const p = i / AIR_STEPS;
+        const sc = 1 - mv.tuck * Math.sin(Math.PI * p);
+        spin += `${at(rel + p * (e - rel))}{transform:rotate(${f(base + total * mv.ease(p))}deg) scale(${sc.toFixed(3)})}`;
+      }
+      base += 360 * mv.turns;
+    } else spin += `${at(e)}{transform:rotate(${f(base)}deg)}`;
 
     arm += `${head}{transform:rotate(0deg)}${at(e)}{transform:rotate(0deg)}`;
 
@@ -871,16 +1003,18 @@ function rigCSS(legs, timing) {
   anc += `${at(hs + HOLD_T)}{transform:translate(${f(last0.ax)}px,${f(last0.ay)}px)}`;
   // still on the web at the apex, so he swings back down and rings out under
   // the anchor before settling - a dead stop mid-arc would look pinned
-  rot += `${at(hs + 0.62)}{transform:rotate(${cssDeg(-last0.aout * 0.34)}deg)}` +
-         `${at(hs + 1.1)}{transform:rotate(${cssDeg(last0.aout * 0.13)}deg)}` +
+  const bowOut = (last0.back ? -1 : 1) * last0.aout;
+  rot += `${at(hs + 0.62)}{transform:rotate(${cssDeg(-bowOut * 0.34)}deg)}` +
+         `${at(hs + 1.1)}{transform:rotate(${cssDeg(bowOut * 0.13)}deg)}` +
          `${at(hs + 1.5)}{transform:rotate(0deg)}` +
          `${at(hs + HOLD_T)}{transform:rotate(0deg)}`;
   len += `${at(hs + HOLD_T)}{transform:scale(1,${f(last0.L)})}`;
   hero += `${at(hs + HOLD_T)}{transform:translateY(${f(last0.L)}px)}`;
   web += `${at(hs + HOLD_T)}{opacity:1}`;
   fig += `${at(hs + HOLD_T)}{opacity:1}`;
-  spin += `${at(hs + 0.3)}{transform:rotate(0deg)}${at(flip)}{transform:rotate(180deg)}` +
-          `${at(hs + HOLD_T)}{transform:rotate(180deg)}`;
+  fly += `${at(hs + HOLD_T)}{transform:none}`;
+  spin += `${at(hs + 0.3)}{transform:rotate(${f(base)}deg)}${at(flip)}{transform:rotate(${f(base + 180)}deg)}` +
+          `${at(hs + HOLD_T)}{transform:rotate(${f(base + 180)}deg)}`;
   arm += `${at(wave0)}{transform:rotate(0deg)}`;
   for (let i = 0; i < 4; i++) {
     arm += `${at(wave0 + 0.2 + i * 0.4)}{transform:rotate(-46deg)}` +
@@ -893,15 +1027,17 @@ function rigCSS(legs, timing) {
   rot += `100%{transform:rotate(0deg)}`;
   len += `100%{transform:scale(1,${f(last0.L)})}`;
   hero += `100%{transform:translateY(${f(last0.L)}px)}`;
-  spin += `100%{transform:rotate(180deg)}`;
+  spin += `100%{transform:rotate(${f(base + 180)}deg)}`;
   web += `100%{opacity:1}`;
   fig += `100%{opacity:1}`;
   arm += `100%{transform:rotate(0deg)}`;
+  fly += `100%{transform:none}`;
   for (const v of [0, 1]) hnd[v] += `100%{opacity:${last0.hand === v ? 1 : 0}}`;
 
   return `@keyframes wanc{${anc}}@keyframes wrot{${rot}}@keyframes wlen{${len}}` +
     `@keyframes whero{${hero}}@keyframes wspin{${spin}}@keyframes wweb{${web}}` +
-    `@keyframes wfig{${fig}}@keyframes warm{${arm}}@keyframes hnd0{${hnd[0]}}@keyframes hnd1{${hnd[1]}}`;
+    `@keyframes wfig{${fig}}@keyframes warm{${arm}}@keyframes wfly{${fly}}` +
+    `@keyframes hnd0{${hnd[0]}}@keyframes hnd1{${hnd[1]}}`;
 }
 
 /**
@@ -1000,7 +1136,7 @@ function renderSwing(grid, theme) {
 
   const seen = new Map();
   legs.forEach((g, k) => {
-    for (const [k2, p] of g.hit) seen.set(k2, timing.start[k] + p * timing.dur[k]);
+    for (const [k2, p] of g.hit) seen.set(k2, timing.start[k] + p * timing.swing[k]);
   });
 
   let total = 0;
@@ -1081,13 +1217,13 @@ function renderSwing(grid, theme) {
   }
 
   const rig =
-    `<g class="wa">` +
+    `<g class="wfly"><g class="wa">` +
     `<g class="wk"><circle cx="0" cy="0" r="2.8" fill="${t.web}" opacity=".5"/>` +
     `<path d="M-4.6 -2 L0 0 M4.6 -2 L0 0 M0 -5 L0 0" stroke="${t.web}" stroke-width="1" stroke-linecap="round" opacity=".35" fill="none"/></g>` +
     `<g class="wr">` +
     `<g class="wl"><rect x="-.65" y="0" width="1.3" height="1" fill="${t.web}" opacity=".72"/></g>` +
     `<g class="wh"><g class="wsp"><g class="wfig">${figure(t, 0)}${figure(t, 1)}</g></g></g>` +
-    `</g></g>`;
+    `</g></g></g>`;
 
   const barW = 150;
   const barY = SP_H - 26;
@@ -1096,8 +1232,9 @@ function renderSwing(grid, theme) {
     `<rect class="sprog" x="${W / 2 - barW / 2}" y="${barY}" width="${barW}" height="2.5" rx="1.25" fill="${t.accent}"/>`;
 
   const css = `
-    .cell,.wa,.wr,.wl,.wh,.wsp,.wk,.wfig,.warm,.h0,.h1,.hud,.sprog,.lf{animation-duration:${SP_TOTAL}s;animation-iteration-count:infinite;animation-timing-function:linear}
-    .wa,.wr,.wl,.wh,.wsp,.warm,.sprog,.cell{transform-box:view-box;transform-origin:0 0}
+    .cell,.wfly,.wa,.wr,.wl,.wh,.wsp,.wk,.wfig,.warm,.h0,.h1,.hud,.sprog,.lf{animation-duration:${SP_TOTAL}s;animation-iteration-count:infinite;animation-timing-function:linear}
+    .wfly,.wa,.wr,.wl,.wh,.wsp,.warm,.sprog,.cell{transform-box:view-box;transform-origin:0 0}
+    .wfly{animation-name:wfly}
     .warm{animation-name:warm;transform-origin:1.6px 9px}
     .wa{animation-name:wanc}.wr{animation-name:wrot}
     .wl{animation-name:wlen,wweb}.wk{animation-name:wweb}
@@ -1122,7 +1259,7 @@ function renderSwing(grid, theme) {
     ${throwCss}
     ${hudCSS}
     @media (prefers-reduced-motion:reduce){
-      .cell,.wa,.wr,.wl,.wh,.wsp,.wk,.wfig,.warm,.h0,.h1,.hud,.sprog,.lf,.kick{animation:none}
+      .cell,.wfly,.wa,.wr,.wl,.wh,.wsp,.wk,.wfig,.warm,.h0,.h1,.hud,.sprog,.lf,.kick{animation:none}
       .lf{opacity:1}.cell{opacity:1}.hb0{opacity:1}.h1{opacity:0}
       .sprog{transform:scaleX(0)}
       .wa{transform:translate(${legs[0].ax.toFixed(2)}px,${legs[0].ay.toFixed(2)}px)}
