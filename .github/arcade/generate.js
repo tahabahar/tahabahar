@@ -572,9 +572,9 @@ const NET_R = 44;
  * sooner instead of speeding him up. Fixing the loop length and dividing it
  * by the leg count is what makes the tempo drift with the data.
  */
-const SWING_T = 0.86;                // seconds for the average swing ITSELF
-const E0 = 0.22;                     // energy left at the apex: he never quite stops
-const FLY_FRAC = 0.3;                // share of a cycle spent off the web
+const SWING_T = 0.68;                // seconds for the average swing ITSELF
+const E0 = 0.4;                      // energy carried into a grab, in units of 2gL
+const FLY_DROP = 22;                 // how far he falls before the next web catches
 const W_REF = 10.4;                  // a typical leg weight, so the dial lands where it says
 const SP_IN = 0.6;                   // beat before he drops into frame
 const SP_GAP = 0.42;                 // he is off the panel between passes
@@ -587,9 +587,9 @@ let SP_PLAY = 26;
 const spct = (t) => +((t / SP_TOTAL) * 100).toFixed(3);
 
 /* -------------------------------------------------------------- swing */
-const REACH = 19;                    // how close he passes to grab someone
+const REACH = 23;                    // how close he passes to grab someone
 const AIN = [20, 26, 32, 38, 44, 50];        // how far behind he grabs on
-const AOUT = [22, 28, 34, 40, 46];           // how far ahead he lets go
+const AOUT = [12, 18, 24, 30, 36, 42];       // how far ahead he lets go
 const L_MIN = 70;
 const L_MAX = 148;
 const ANCHOR_MIN_Y = -155;           // webs may leave the frame, but not absurdly
@@ -665,11 +665,10 @@ function pendulumProfile(ain, aout, n) {
 }
 
 const legWeight = (L, ain, aout) => Math.max(7, Math.sqrt(L) * ((ain + aout) / 76));
-// SWING_T times how the arc compares to a typical one, then grossed up for the
-// fall that follows - so the dial keeps meaning "how long a swing takes to
-// watch" no matter how much of each cycle is spent off the web
-const legDur = (l) =>
-  ((legWeight(l.L, l.ain, l.aout) / W_REF) * SWING_T) / (1 - FLY_FRAC);
+// SWING_T times how this arc compares to a typical one. The fall that follows
+// is timed by physics, not by a share of the cycle, so this stays exactly what
+// the dial says: how long a swing takes to watch.
+const legDur = (l) => (legWeight(l.L, l.ain, l.aout) / W_REF) * SWING_T;
 
 /**
  * What happens after he lets go.
@@ -681,16 +680,17 @@ const legDur = (l) =>
  * when the new rope simply appeared at the old one's apex.
  */
 function flight(l) {
-  const d = legDur(l);
-  const ds = d * (1 - FLY_FRAC);
-  const df = d * FLY_FRAC;
+  const ds = legDur(l);
   const K = ((pendulumProfile(l.ain, l.aout, 1).tnorm / ds) * Math.PI) / 180;
   const v = l.L * omega(l.aout, l.ain) * K;
   const g = (l.L * K * K) / 2;
   const vx = v * Math.cos(rad(l.aout));
   const vy = -v * Math.sin(rad(l.aout));
+  // it lasts exactly as long as the arc takes to bring him FLY_DROP below the
+  // release, so a fast flat launch buys a long throw and a tired one does not
+  const df = (-vy + Math.sqrt(vy * vy + 2 * g * FLY_DROP)) / g;
   const at = (t) => [vx * t, vy * t + 0.5 * g * t * t];
-  return { ds, df, g, v, at, end: at(df) };
+  return { ds, df, g, v, vx, vy, at, end: at(df) };
 }
 
 // who this arc passes close enough to grab, and how far through the leg
@@ -731,7 +731,7 @@ function planRoute(grid, rng) {
       if (grid[c][r]) left.set(key(c, r), { c, r, x: cx(c), y: scy(r) });
 
   const legs = [];
-  const RIGHT = GX + GRID_W + 18;
+  const RIGHT = GX + GRID_W - 26;
 
   for (let pass = 0; pass < PASS_MAX && left.size && legs.length < LEG_MAX; pass++) {
     let prev = null;
@@ -777,8 +777,14 @@ function planRoute(grid, rng) {
             let pull = 0;
             for (const c2 of left.values())
               if (Math.abs(c2.x - rx2) < 90 && Math.abs(c2.y - ry2) < 60) pull++;
-            const score = hit.size * 14 + pull * 0.35 - (rx2 - ax) * 0.045 + rng() * 4;
-            if (!best || score > best.score) best = { g, hit, score, rx2 };
+            // reward the throw the release actually buys: letting go while the
+            // speed is still there is what turns the fall into a real arc
+            const air = flight(g);
+            const score =
+              hit.size * 14 + pull * 0.35 + air.end[0] * 0.09 - (rx2 - ax) * 0.045 + rng() * 4;
+            // where the NEXT web gets grabbed - past the throw, not at the
+            // release - is what decides whether the pass has run out of facade
+            if (!best || score > best.score) best = { g, hit, score, rx2: rx2 + air.end[0] };
           }
         }
       }
@@ -808,57 +814,34 @@ function planRoute(grid, rng) {
     legs[legs.length - 1].exit = true;
   }
 
-  // Curtain call: one more swing, judged on where it PARKS him rather than on
-  // who it saves, so he finishes hanging just under the web with everyone he
-  // pulled off the facade.
+  // Curtain call.
+  //
+  // Chaining this off wherever the run happened to end never worked: the throws
+  // are long, the last pass can hand him over a hundred and fifty pixels past
+  // the panel, and no single swing reaches back from there - he took his bow
+  // half behind the border. So the run ends properly instead. The last working
+  // leg tumbles him out of frame like any pass end, and the closing swing comes
+  // in fresh, which lets it be placed rather than negotiated: he drops in beside
+  // the web, rings out under it, and turns over.
   const last = legs[legs.length - 1];
-  last.exit = false;
-  let approach = null;
-  const lf = flight(last);
-  const [lx0, ly0] = legPos(last, last.aout);
-  const lx = lx0 + lf.end[0];
-  const ly = ly0 + lf.end[1];
-  for (let row = 0; row < ROWS; row++) {
-    const rowY = scy(row);
-    for (const ain of AIN) {
-      const drop = rowY - ly;
-      if (drop < 3) continue;
-      const L = drop / (1 - Math.cos(rad(ain)));
-      // this one carries no rescues, so let it be a long lazy traverse if that
-      // is what it takes to put him under the web
-      if (L < L_MIN || L > 250) continue;
-      const ay = rowY - L;
-      if (ay < ANCHOR_MIN_Y - 90) continue;
-      // The run always ends wherever the last pass dropped him, and every other
-      // leg puts its anchor AHEAD - so from the right edge there is no way back
-      // and the bow ends up half behind the panel border. The closing swing is
-      // the one place he may go the other way: anchor behind him, swinging back
-      // toward the middle. Mirroring is free, because a backward swing is just
-      // the forward profile with every angle negated.
-      for (const back of [false, true]) {
-        const ax = lx + (back ? -1 : 1) * L * Math.sin(rad(ain));
-        for (const aout of AOUT) {
-          if (!reachable(ain, aout)) continue;
-          const g = { ax, ay, L, ain, aout, row, back };
-          // he settles at the BOTTOM of this arc, not at the apex he stops on,
-          // so that is the point to park near the web
-          const rest = back ? ax - L * Math.sin(rad(aout)) : ax + L * Math.sin(rad(aout));
-          const off = Math.max(0, ax - (W - 66)) + Math.max(0, GX + 34 - ax) +
-                      Math.max(0, rest - (W - 30)) + Math.max(0, GX - rest);
-          const cost = Math.hypot(ax - (NET_X - 18), ay + L - (NET_Y + 108)) + off * 40;
-          if (!approach || cost < approach.cost) approach = { g, cost };
-        }
-      }
-    }
-  }
-  if (approach) {
-    const g = approach.g;
-    g.hit = new Map();
-    g.pass = last.pass;
-    g.hand = legs.length % 2;
-    g.air = 0;
-    legs.push(g);
-  }
+  last.exit = true;
+
+  let bowRow = 0;
+  for (let r = 1; r < ROWS; r++)
+    if (Math.abs(scy(r) - (NET_Y + 104)) < Math.abs(scy(bowRow) - (NET_Y + 104))) bowRow = r;
+  const bowL = 128;
+  legs.push({
+    ax: NET_X - 20,
+    ay: scy(bowRow) - bowL,
+    L: bowL,
+    ain: 36,
+    aout: 18,
+    row: bowRow,
+    hit: new Map(),
+    pass: last.pass + 1,
+    hand: legs.length % 2,
+    air: 0,
+  });
   legs[legs.length - 1].bow = true;                       // the hold hangs off this one
   return legs;
 }
@@ -871,8 +854,8 @@ function legTiming(legs) {
   // keeps a clean-up swing from flicking past unread. This has to be the same
   // formula the planner used, because the planner needed each leg's duration to
   // work out how far the fall after it carries him.
-  const dur = legs.map(legDur);
-  const swing = legs.map((l, k) => (l.bow ? dur[k] : dur[k] * (1 - FLY_FRAC)));
+  const swing = legs.map(legDur);
+  const dur = legs.map((l, k) => (l.bow ? swing[k] : swing[k] + flight(l).df));
 
   const start = [];
   let acc = SP_IN;
