@@ -1063,7 +1063,11 @@ function renderSwing(grid, theme) {
   for (let i = 0; i < HUD_STEPS; i++) {
     const p0 = i / HUD_STEPS;
     const p1 = (i + 1) / HUD_STEPS;
-    const cut = SP_IN + ((p0 + p1) / 2) * SP_PLAY;
+    // Read the count mid-window, so the number never runs ahead of the throws
+    // you can see. The last one is special: it has to be the true final total,
+    // because a mid-window reading there misses whoever is still in the air -
+    // and that wrong number is the one left on screen for the whole bow.
+    const cut = i === HUD_STEPS - 1 ? SP_IN + SP_PLAY : SP_IN + ((p0 + p1) / 2) * SP_PLAY;
     let n = 0;
     while (n < visits.length && visits[n] <= cut) n++;
     const a = i === 0 ? 0 : spct(SP_IN + p0 * SP_PLAY);
